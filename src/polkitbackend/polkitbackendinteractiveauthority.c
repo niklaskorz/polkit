@@ -685,6 +685,7 @@ check_authorization_challenge_cb (AuthenticationAgent         *agent,
 
           is_temp = TRUE;
 
+          g_print ("Adding to temp auth store: %s \n", action_id);
           id = temporary_authorization_store_add_authorization (priv->temporary_authorization_store,
                                                                 subject,
                                                                 authentication_agent_get_scope (agent),
@@ -1193,6 +1194,7 @@ check_authorization_sync (PolkitBackendAuthority         *authority,
     }
 
   /* then see if there's a temporary authorization for the subject */
+  g_print ("Has temporary authorization?\n");
   if (temporary_authorization_store_has_authorization (priv->temporary_authorization_store,
                                                        subject,
                                                        action_id,
@@ -3165,6 +3167,8 @@ subject_equal_for_authz (PolkitSubject *a,
 {
   if (!polkit_subject_equal (a, b))
     {
+      g_warning ("authcheck: subject not equal");
+
 #ifdef __linux__
       PolkitSubject *parent = NULL;
       gchar *ctty_path = NULL;
@@ -3174,42 +3178,58 @@ subject_equal_for_authz (PolkitSubject *a,
        * then we also consider them equal for auth purposes if they share the
        * same UID, PPID, Control Group and controlling terminal.
        */
-      if (!POLKIT_IS_UNIX_PROCESS (a) || !POLKIT_IS_UNIX_PROCESS (b))
+      if (!POLKIT_IS_UNIX_PROCESS (a) || !POLKIT_IS_UNIX_PROCESS (b)) {
+        g_warning ("authcheck: not a unix process");
         goto error;
+      }
 
       if (!polkit_unix_process_get_pidfd_is_safe (POLKIT_UNIX_PROCESS (a)) ||
-          !polkit_unix_process_get_pidfd_is_safe (POLKIT_UNIX_PROCESS (b)))
+          !polkit_unix_process_get_pidfd_is_safe (POLKIT_UNIX_PROCESS (b))) {
+        g_warning ("authcheck: pidfd not safe");
         goto error;
+      };
 
       int uid_a = polkit_unix_process_get_uid (POLKIT_UNIX_PROCESS (a));
       int uid_b = polkit_unix_process_get_uid (POLKIT_UNIX_PROCESS (b));
-      if (uid_a == -1 || uid_b == -1 || uid_a != uid_b)
+      if (uid_a == -1 || uid_b == -1 || uid_a != uid_b) {
+        g_warning ("authcheck: uid mismach");
         goto error;
+      }
 
       if (polkit_unix_process_get_pidfd (POLKIT_UNIX_PROCESS (a)) < 0 ||
-          polkit_unix_process_get_pidfd (POLKIT_UNIX_PROCESS (b)) < 0)
+          polkit_unix_process_get_pidfd (POLKIT_UNIX_PROCESS (b)) < 0) {
+        g_warning ("authcheck: negative pidfd");
         goto error;
+      }
 
       /* Ensure the parent process is still running and still the same, and not PID 1
        * (due to reparenting) */
       gint ppid_a = polkit_unix_process_get_ppid (POLKIT_UNIX_PROCESS (a));
       gint ppid_b = polkit_unix_process_get_ppid (POLKIT_UNIX_PROCESS (b));
-      if (ppid_a <= 1 || ppid_a != ppid_b)
+      if (ppid_a <= 1 || ppid_a != ppid_b) {
+        g_warning ("authcheck: ppid mismatch or PID 1");
         goto error;
+      }
 
       gint ppid_fd = polkit_unix_process_get_ppidfd (POLKIT_UNIX_PROCESS (a));
-      if (ppid_fd < 0)
+      if (ppid_fd < 0) {
+        g_warning ("authcheck: negative ppidfd");
         goto error;
+      }
 
       parent = polkit_unix_process_new_pidfd (ppid_fd, -1, NULL);
-      if (!parent)
+      if (!parent) {
+        g_warning ("authcheck: no parent");
         goto error;
+      }
 
       /* Ensure all processes are in the same cgroup */
       if (polkit_unix_process_get_cgroupid (POLKIT_UNIX_PROCESS (a)) != polkit_unix_process_get_cgroupid (POLKIT_UNIX_PROCESS (b)) ||
           polkit_unix_process_get_cgroupid (POLKIT_UNIX_PROCESS (a)) != polkit_unix_process_get_cgroupid (POLKIT_UNIX_PROCESS (parent)) ||
-          polkit_unix_process_get_cgroupid (POLKIT_UNIX_PROCESS (a)) == 0)
+          polkit_unix_process_get_cgroupid (POLKIT_UNIX_PROCESS (a)) == 0) {
+        g_warning ("authcheck: cgroup mismatch or 0");
         goto error;
+      }
 
       /*
        * Ensure the controlling terminal is the same and older than both processes,
@@ -3219,21 +3239,29 @@ subject_equal_for_authz (PolkitSubject *a,
       guint ttynr_parent = polkit_unix_process_get_ctty (POLKIT_UNIX_PROCESS (parent));
       if (ttynr_parent != polkit_unix_process_get_ctty (POLKIT_UNIX_PROCESS (a)) ||
           ttynr_parent != polkit_unix_process_get_ctty (POLKIT_UNIX_PROCESS (b)) ||
-          ttynr_parent == 0)
+          ttynr_parent == 0) {
+        g_warning("authcheck: CTTY mismatch or 0");
         goto error;
+      }
 
       ctty_path = g_strdup_printf ("/dev/pts/%u", ((ttynr_parent & 0xfff00000) >> 12) | (ttynr_parent & 0xff));
 
       struct statx st;
-      if (statx (AT_FDCWD, ctty_path, 0, STATX_CTIME, &st) != 0)
+      if (statx (AT_FDCWD, ctty_path, 0, STATX_CTIME, &st) != 0) {
+        g_warning("authcheck: could not read ctty ctime");
         goto error;
+      }
 
       time_t btime = parse_boottime ();
-      if (btime < 0)
+      if (btime < 0) {
+        g_warning("authcheck: negative boottime");
         goto error;
+      }
 
-      if (st.stx_ctime.tv_sec < btime)
+      if (st.stx_ctime.tv_sec < btime) {
+        g_warning("authcheck: tv less than btime");
         goto error;
+      }
 
       /* TTY creation time is a unix timestamp, while process start time is monotonic,
        * subtract the boot timestamp to compare them */
@@ -3242,8 +3270,10 @@ subject_equal_for_authz (PolkitSubject *a,
       /* Process start time is in jiffies, so get the jiffies-per-second to
        * compare it with the TTY ctime */
       int jiffies = sysconf(_SC_CLK_TCK);
-      if (jiffies <= 0)
+      if (jiffies <= 0) {
+        g_warning("authcheck: no process start time");
         goto error;
+      }
 
       struct statx_timestamp start_time_a;
       struct statx_timestamp start_time_b;
@@ -3256,12 +3286,16 @@ subject_equal_for_authz (PolkitSubject *a,
       if (start_time_a.tv_sec < st.stx_ctime.tv_sec ||
           (start_time_a.tv_sec == st.stx_ctime.tv_sec && start_time_a.tv_nsec < st.stx_ctime.tv_nsec) ||
            start_time_b.tv_sec < st.stx_ctime.tv_sec ||
-          (start_time_b.tv_sec == st.stx_ctime.tv_sec && start_time_b.tv_nsec < st.stx_ctime.tv_nsec))
+          (start_time_b.tv_sec == st.stx_ctime.tv_sec && start_time_b.tv_nsec < st.stx_ctime.tv_nsec)) {
+        g_warning("authcheck: tv check failed");
         goto error;
+      }
 
       /* Check that the parent is still running at the very end, to avoid races */
-      if (polkit_unix_process_get_pid (POLKIT_UNIX_PROCESS (parent)) <= 0)
+      if (polkit_unix_process_get_pid (POLKIT_UNIX_PROCESS (parent)) <= 0) {
+        g_warning("authcheck: parent not running anymore");
         goto error;
+      }
 
       g_free (ctty_path);
       g_object_unref (parent);
@@ -3272,10 +3306,12 @@ error:
       g_object_unref (parent);
       return FALSE;
 #else /* __linux__ */
+      g_warning ("authcheck: not linux");
       return FALSE;
 #endif /* __linux__ */
     }
 
+  g_warning ("authcheck: subject equal");
   /* Now special case unix processes, as we want to protect against
    * pid reuse by including the PID FDs or UIDs as a fallback.
    */
@@ -3333,9 +3369,14 @@ temporary_authorization_store_has_authorization (TemporaryAuthorizationStore *st
 
   ret = FALSE;
 
+  gchar *s = polkit_subject_to_string (subject);
+  g_print ("Checking action %s, subject %s (store %d)\n", action_id, s, store->serial);
+  g_free (s);
+
   for (l = store->authorizations; l != NULL; l = l->next) {
     TemporaryAuthorization *authorization = l->data;
 
+    g_print ("against %s (%d)\n", authorization->action_id, strcmp (action_id, authorization->action_id));
     if (strcmp (action_id, authorization->action_id) == 0 &&
         subject_equal_for_authz (subject_to_use, authorization->subject))
       {
@@ -3347,6 +3388,7 @@ temporary_authorization_store_has_authorization (TemporaryAuthorizationStore *st
   }
 
  out:
+  g_print ("Result: %d\n", ret);
   g_object_unref (subject_to_use);
   return ret;
 }
@@ -3358,7 +3400,7 @@ on_expiration_timeout (gpointer user_data)
   gchar *s;
 
   s = polkit_subject_to_string (authorization->subject);
-  g_debug ("Removing tempoary authorization with id `%s' for action-id `%s' for subject `%s': "
+  g_warning ("on_expiration_timeout: Removing temporary authorization with id `%s' for action-id `%s' for subject `%s': "
            "authorization has expired",
            authorization->id,
            authorization->action_id,
@@ -3397,17 +3439,17 @@ on_unix_process_check_vanished_timeout (gpointer user_data)
           gchar *s;
 
           s = polkit_subject_to_string (authorization->subject);
-          g_debug ("Removing tempoary authorization with id `%s' for action-id `%s' for subject `%s': "
+          g_warning ("on_unix_process_check_vanished_timeout: Removing temporary authorization with id `%s' for action-id `%s' for subject `%s': "
                    "subject has vanished",
                    authorization->id,
                    authorization->action_id,
                    s);
           g_free (s);
 
-          authorization->store->authorizations = g_list_remove (authorization->store->authorizations,
-                                                                authorization);
-          g_signal_emit_by_name (authorization->store->authority, "changed");
-          temporary_authorization_free (authorization);
+          //authorization->store->authorizations = g_list_remove (authorization->store->authorizations,
+          //                                                      authorization);
+          //g_signal_emit_by_name (authorization->store->authority, "changed");
+          //temporary_authorization_free (authorization);
         }
     }
 
@@ -3438,8 +3480,9 @@ temporary_authorization_store_remove_authorizations_for_system_bus_name (Tempora
 
 
       s = polkit_subject_to_string (ta->subject);
-      g_debug ("Removing tempoary authorization with id `%s' for action-id `%s' for subject `%s': "
+      g_warning ("tastra_for_system_bus_name(%s): Removing temporary authorization with id `%s' for action-id `%s' for subject `%s': "
                "subject has vanished",
+               name,
                ta->id,
                ta->action_id,
                s);
@@ -3468,9 +3511,22 @@ temporary_authorization_store_add_authorization (TemporaryAuthorizationStore *st
   g_return_val_if_fail (store != NULL, NULL);
   g_return_val_if_fail (POLKIT_IS_SUBJECT (subject), NULL);
   g_return_val_if_fail (action_id != NULL, NULL);
+  g_print ("in add temp auth, checking for duplicate\n");
   g_return_val_if_fail (!temporary_authorization_store_has_authorization (store, subject, action_id, NULL), NULL);
 
+  g_print ("Adding auth to temp store\n");
+
   subject_to_use = convert_temporary_authorization_subject (subject);
+
+  gchar *subj_str = polkit_subject_to_string(subject);
+  g_print ("Subject: %s\n", subj_str);
+  g_free(subj_str);
+  subj_str = polkit_subject_to_string(scope);
+  g_print ("Scope: %s\n", subj_str);
+  g_free(subj_str);
+  subj_str = polkit_subject_to_string(subject_to_use);
+  g_print ("Subject to use: %s\n", subj_str);
+  g_free(subj_str);
 
   /* TODO: right now the time the temporary authorization is kept is hard-coded - we
    *       could make it a propery on the PolkitBackendInteractiveAuthority class (so
@@ -3511,6 +3567,7 @@ temporary_authorization_store_add_authorization (TemporaryAuthorizationStore *st
        *       to the netlink socket. Needs looking into.
        */
 
+      g_print ("Setting vanished timeout\n");
       authorization->check_vanished_timeout_id = g_timeout_add_seconds (2,
                                                                         on_unix_process_check_vanished_timeout,
                                                                         authorization);
@@ -3527,6 +3584,7 @@ temporary_authorization_store_add_authorization (TemporaryAuthorizationStore *st
 
   g_object_unref (subject_to_use);
 
+  g_print ("Added auth: %s\n", authorization->id);
   return authorization->id;
 }
 

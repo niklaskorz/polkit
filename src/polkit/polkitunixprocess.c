@@ -1113,13 +1113,17 @@ polkit_unix_process_exists_sync (PolkitSubject   *subject,
   ret = TRUE;
 
   pid = polkit_unix_process_get_pid(process);
-  if (pid <= 0)
+  if (pid <= 0) {
+    g_warning ("upe: pid <= 0: %d", pid);
     return FALSE;
+  }
 
   /* If we have both a valid PID and a PID FD then we know the process is still the
    * same and it hasn't exited. */
-  if (polkit_unix_process_get_pidfd(process) >= 0)
+  gint pidfd = polkit_unix_process_get_pidfd(process);
+  if (pidfd >= 0)
     return TRUE;
+  g_warning ("upe: pidfd < 0: %d", pidfd);
 
   local_error = NULL;
   start_time = get_start_time_for_pid (pid, &local_error);
@@ -1133,6 +1137,7 @@ polkit_unix_process_exists_sync (PolkitSubject   *subject,
     {
       if (start_time != process->start_time)
         {
+          g_warning ("upe: starttime mismatch: %ld != %ld", start_time, process->start_time);
           ret = FALSE;
         }
     }
